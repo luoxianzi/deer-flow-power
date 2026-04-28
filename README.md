@@ -17,11 +17,6 @@
 
 在理想的独立子任务场景下，6 个等时长任务从官方默认 `ceil(6/3)=2` 批减少到本版本 `ceil(6/6)=1` 批，墙钟耗时理论下降约 `50%`；线程池容量从 3 提到 8，调度/执行容量约 `2.67x`。同时，API Pool 失败恢复和 sandbox 自动恢复减少了人工重跑次数，提升长任务完成率。
 
-## 小米开发者认证填写参考
-
-```text
-我基于开源 DeerFlow 2.0 构建了一个面向真实研发流程的 Agent 协作平台，核心解决长任务开发中模型切换不一致、API 网关不稳定、子任务并发不足、sandbox 容易失联和调试成本高的问题。相比官方版本，我新增了 Claude/Codex/API Pool 统一模型路由、多 gateway/多 key 轮转、409 并发满载重试、Claude OAuth 自动续期、Opus 4.7 adaptive thinking、Docker power profile、sandbox 预热与自动恢复，并把 subagent 默认并发从 3 提升到 6、硬上限从 4 提升到 8、执行线程池从 3 提升到 8。实际使用时，主 Agent 负责需求分析和任务编排，多个 subagent 并行完成代码阅读、实现、测试和文档整理。对于 6 个可并行子任务，理想墙钟耗时可下降约 50%，执行容量提升约 2.67 倍。项目已通过后端 2094 项测试、前端 typecheck/lint/unit test，可作为 AI 驱动研发效率提升的工程化实践。
-```
 
 ## Official DeerFlow 2.0 Base Documentation
 
