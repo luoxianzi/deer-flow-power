@@ -1,0 +1,269 @@
+# Configuration for the DeerFlow power profile.
+#
+# This profile keeps the existing stable config.yaml untouched and switches
+# the sandbox to container-backed execution with tightly scoped host mounts.
+
+config_version: 3
+
+log_level: info
+
+token_usage:
+  # Opus 4.7 uses a new tokenizer that can count 1.0x–1.35x as many tokens as
+  # 4.6 for identical input. Keep per-response telemetry on so the frontend can
+  # surface real cost/usage numbers for 1M-context runs.
+  enabled: true
+
+models:
+  - name: gpt-5.4
+    display_name: GPT-5.4 (Codex CLI)
+    use: deerflow.models.openai_codex_provider:CodexChatModel
+    model: gpt-5.4
+    reasoning_effort: high
+    supports_thinking: true
+    supports_reasoning_effort: true
+
+  - name: gpt-5.4-mini
+    display_name: GPT-5.4 Mini (Codex CLI)
+    use: deerflow.models.openai_codex_provider:CodexChatModel
+    model: gpt-5.4-mini
+    reasoning_effort: medium
+    supports_thinking: true
+    supports_reasoning_effort: true
+
+  - name: claude-sonnet-4-6
+    display_name: Claude Sonnet 4.6 · 1M · OAuth
+    description: Fast + cheap daily driver. 1M context, 64k max output, extended + adaptive thinking.
+    use: deerflow.models.claude_provider:ClaudeChatModel
+    model: claude-sonnet-4-6
+    # Sonnet 4.6 caps output at 64k; leave headroom vs summarization triggers.
+    max_tokens: 32768
+    supports_thinking: true
+
+  - name: claude-opus-4-7
+    display_name: Claude Opus 4.7 · 1M · OAuth
+    description: Anthropic's most capable model. 1M context, 128k max output, adaptive thinking, tunable effort (low/medium/high/xhigh).
+    use: deerflow.models.claude_provider:ClaudeChatModel
+    model: claude-opus-4-7
+    # Opus 4.7's new tokenizer counts 1.0x–1.35x more tokens than 4.6, and the
+    # API allows up to 128k max output. 64k is a good agent ceiling that still
+    # leaves headroom inside the 1M-token window after long tool traces.
+    max_tokens: 65536
+    supports_thinking: true
+    # Exposes the reasoning-effort selector in the frontend. The provider maps
+    # it to Anthropic's beta `output_config.effort` (task-budgets-2026-03-13).
+    supports_reasoning_effort: true
+    reasoning_effort: high
+    # Opus 4.7's only thinking-on shape is `{type: adaptive}`. Opt into the
+    # summarized display so stream viewers see reasoning progress while the
+    # model is thinking.
+    when_thinking_enabled:
+      thinking:
+        type: adaptive
+        display: summarized
+
+  - name: api-pool-default
+    display_name: 弹药库 (API Pool / gpt-5.4)
+    description: Standard OpenAI-compatible API pool via API_POOL_BASE_URL and API_POOL_KEYS
+    use: deerflow.models.standard_api_provider:StandardAPIChatModel
+    model: api-pool-default
+    supports_thinking: true
+    supports_reasoning_effort: true
+    reasoning_effort: xhigh
+
+  - name: glm-5.1
+    display_name: GLM-5.1 (Modal Research · 深度推理)
+    description: "ZhipuAI GLM-5.1-FP8 深度推理模型。Modal 常见限制为 1 个并发请求，请勿开启 Ultra/子任务模式，否则可能触发 429。适合单线程深度分析任务。"
+    use: deerflow.models.standard_api_provider:StandardAPIChatModel
+    model: zai-org/GLM-5.1-FP8
+    base_url: https://api.us-west-2.modal.direct/v1
+    api_key: $GLM_5_1_API_KEYS
+    max_tokens: 8192
+    supports_thinking: true
+    supports_reasoning_effort: false
+
+acp_agents:
+  claude_code:
+    command: npx
+    args: ["-y", "@zed-industries/claude-agent-acp"]
+    description: Claude Code pinned to Sonnet 4.6 for fast daily implementation, UI iteration, and medium-complexity tasks
+    model: claude-sonnet-4-6
+    auto_approve_permissions: true
+  claude_code_sonnet:
+    command: npx
+    args: ["-y", "@zed-industries/claude-agent-acp"]
+    description: Claude Code pinned to Sonnet 4.6 for fast daily implementation, UI iteration, and medium-complexity tasks
+    model: claude-sonnet-4-6
+    auto_approve_permissions: true
+  claude_code_opus:
+    command: npx
+    args: ["-y", "@zed-industries/claude-agent-acp"]
+    description: Claude Code pinned to Opus 4.7 (1M context) for deep implementation, long-horizon agentic coding, and hard debugging.
+    model: claude-opus-4-7
+    auto_approve_permissions: true
+
+tool_groups:
+  - name: file:read
+  - name: file:write
+  - name: bash
+
+tools:
+  - name: ls
+    group: file:read
+    use: deerflow.sandbox.tools:ls_tool
+
+  - name: read_file
+    group: file:read
+    use: deerflow.sandbox.tools:read_file_tool
+
+  - name: write_file
+    group: file:write
+    use: deerflow.sandbox.tools:write_file_tool
+
+  - name: str_replace
+    group: file:write
+    use: deerflow.sandbox.tools:str_replace_tool
+
+  - name: bash
+    group: bash
+    use: deerflow.sandbox.tools:bash_tool
+
+runtime_profiles:
+  # Default "ultra" now pins Claude Opus 4.7 (1M context, adaptive thinking, xhigh
+  # effort). Opus OAuth is the most reliable backbone — it does not depend on
+  # the api-pool gateway's uptime, and Opus 4.7 is the top-quality choice for
+  # long-horizon agentic work.
+  ultra:
+    thinking_enabled: true
+    subagent_enabled: true
+    model_name: claude-opus-4-7
+    reasoning_effort: xhigh
+  # Same as ultra — kept as an explicit alias for clarity in the UI.
+  ultra-opus:
+    thinking_enabled: true
+    subagent_enabled: true
+    model_name: claude-opus-4-7
+    reasoning_effort: xhigh
+  # Sonnet 4.6 for the same workflow when you want the faster/cheaper path.
+  ultra-sonnet:
+    thinking_enabled: true
+    subagent_enabled: true
+    model_name: claude-sonnet-4-6
+  # For Codex / API-pool pipelines specifically — pick this when you explicitly
+  # want to exercise the gpt-5.4 path (or test the api-pool gateway). Without a
+  # pinned model, model_name resolution falls back to the first configured model.
+  ultra-codex:
+    thinking_enabled: true
+    subagent_enabled: true
+    model_name: gpt-5.4
+    reasoning_effort: xhigh
+  glm:
+    thinking_enabled: true
+    subagent_enabled: false
+    reasoning_effort: null
+
+tool_search:
+  # Deferred MCP tool loading keeps the primary context slim: tool schemas are
+  # only injected when the agent calls `tool_search`. Pairs well with a 1M
+  # Opus 4.7 window where the incremental context cost still compounds across
+  # many-tool configs.
+  enabled: true
+
+agents_api:
+  # Upstream merged a gate that hides the custom-agent management endpoints
+  # behind this switch. Power profile needs them on — that is how the frontend
+  # lists your 14 custom agents at /api/agents.
+  enabled: true
+
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+  # Start above the usual 39080–39090 cluster (manual/extra sandboxes) to reduce port-bind retries.
+  port: 39120
+  # Pre-warmed pool. New threads allocate from this pool instantly instead of
+  # waiting ~3-5s for a fresh docker container boot. Tune downward if you're
+  # memory-constrained; each replica holds ~200MB idle.
+  replicas: 2
+  container_prefix: deer-flow-power-sandbox
+  idle_timeout: 1800
+  mounts:
+    - host_path: $POWER_WORKSPACES_PATH
+      container_path: /mnt/host/workspaces
+      read_only: false
+    - host_path: $POWER_DOCUMENTS_PATH
+      container_path: /mnt/host/Documents
+      read_only: true
+    - host_path: $POWER_DOWNLOADS_PATH
+      container_path: /mnt/host/Downloads
+      read_only: true
+    - host_path: $POWER_PROJECT_ROOT_PATH
+      container_path: /mnt/host/omniai-whatsapp-v2
+      read_only: false
+    - host_path: $POWER_MOS1_PROJECT_PATH
+      container_path: /mnt/host/MOS1.0-main
+      read_only: false
+    - host_path: $POWER_OMS_PROJECT_PATH
+      container_path: /mnt/host/Oms-main
+      read_only: false
+    - host_path: $POWER_WEBSITE_PROJECT_PATH
+      container_path: /mnt/projects/website
+      read_only: false
+    - host_path: $POWER_GITCONFIG_PATH
+      container_path: /root/.gitconfig
+      read_only: true
+    - host_path: $POWER_SSH_DIR_PATH
+      container_path: /root/.ssh
+      read_only: true
+    - host_path: $POWER_SSH_SYSTEM_CONFIG_PATH
+      container_path: /etc/ssh/ssh_config.d/99-deerflow-power.conf
+      read_only: true
+    - host_path: $POWER_SSH_SYSTEM_KNOWN_HOSTS_PATH
+      container_path: /etc/ssh/ssh_known_hosts
+      read_only: true
+    - host_path: $POWER_SANDBOX_SSH_HOOK_SCRIPT_PATH
+      container_path: /opt/deerflow-hooks/setup_ssh.sh
+      read_only: true
+    - host_path: $POWER_PRIVATE_TMP_PATH
+      container_path: /private/tmp
+      read_only: false
+  environment:
+    SSH_AUTH_SOCK: $POWER_SSH_AUTH_SOCK
+    RUN_HOOK_PRE_SERVICES: $POWER_SANDBOX_RUN_HOOK_PRE_SERVICES
+
+skills:
+  container_path: /mnt/skills
+
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: gpt-5.4-mini
+
+checkpointer:
+  type: sqlite
+  connection_string: checkpoints.db
+
+summarization:
+  # Guard-rail for the 1M Opus 4.7 window: most threads will never touch this,
+  # but long multi-subagent traces (design-doc + code review + debug in one
+  # thread) can climb past 800k tokens. Trigger at ~900k to keep ~100k headroom
+  # for the summarization pass itself to run without hitting the hard limit.
+  enabled: true
+  trigger:
+    type: tokens
+    value: 900000
+  keep:
+    type: messages
+    value: 40
+
+memory:
+  # Persistent per-user memory across threads. Opus 4.7 has improved
+  # file-system-style memory usage, so the extracted `<memory>` block in the
+  # system prompt gives it real leverage. Extraction runs on api-pool so it
+  # does NOT consume the Claude OAuth Max quota.
+  enabled: true
+  storage_path: memory.json
+  debounce_seconds: 30
+  model_name: api-pool-default
+  max_facts: 100
+  fact_confidence_threshold: 0.7
+  injection_enabled: true

@@ -1,0 +1,9 @@
+# DeerFlow minimal profile backup override.
+#
+# Reuses the original docker-compose-dev stack and runtime data, but moves the
+# nginx entrypoint off the default port so the power profile can own 2026.
+
+services:
+  nginx:
+    ports: !override
+      - "127.0.0.1:${MINIMAL_PORT:-2226}:2026"

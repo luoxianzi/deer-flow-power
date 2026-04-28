@@ -1,0 +1,277 @@
+# DeerFlow power profile.
+#
+# Runs alongside the existing docker-compose-dev stack without reusing its
+# container names or runtime data directory. The default localhost entrypoint
+# is intended to move to this profile.
+
+# Pin project name so `docker compose -f ...` from this directory always attaches
+# services to the same user-defined network (not `docker_deer-flow-power`), which
+# would orphan nginx upstreams and cause 502.
+name: deer-flow-power
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: deer-flow-power-nginx
+    init: true
+    ports:
+      - "127.0.0.1:${POWER_PORT:-2026}:2026"
+    volumes:
+      # Mount as a template and let nginx's envsubst entrypoint render it.
+      # The upstream-merged nginx.conf uses ${LANGGRAPH_UPSTREAM} / ${LANGGRAPH_REWRITE}
+      # which nginx itself cannot resolve at runtime — envsubst does the substitution
+      # before nginx starts.
+      - ./nginx/${NGINX_CONF:-nginx.conf}:/etc/nginx/templates/nginx.conf.template:ro
+    environment:
+      # Standard mode (LangGraph Server runs as its own container):
+      # /api/langgraph/* → langgraph:2024 with rewrite to /*
+      - LANGGRAPH_UPSTREAM=${LANGGRAPH_UPSTREAM:-langgraph:2024}
+      - LANGGRAPH_REWRITE=${LANGGRAPH_REWRITE:-/}
+      # envsubst templating: preserve $uri / $http_x_* style nginx variables by
+      # restricting substitution to our two knobs.
+      - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
+      - NGINX_ENVSUBST_FILTER=^(LANGGRAPH_UPSTREAM|LANGGRAPH_REWRITE)$
+    depends_on:
+      - frontend
+      - gateway
+      - langgraph
+    networks:
+      - deer-flow-power
+    restart: unless-stopped
+    cpus: 0.50
+    mem_limit: 128m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ../
+      dockerfile: frontend/Dockerfile
+      target: prod
+      args:
+        PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
+    container_name: deer-flow-power-frontend
+    init: true
+    # BETTER_AUTH_SECRET：从仓库根 .env 注入（避免 compose 解析阶段 ${BETTER_AUTH_SECRET} 为空覆盖掉 env_file）
+    env_file:
+      - ../.env
+      - ../frontend/.env
+    networks:
+      - deer-flow-power
+    restart: unless-stopped
+    cpus: 1.00
+    mem_limit: 768m
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gateway:
+    build:
+      context: ../
+      dockerfile: backend/Dockerfile
+    container_name: deer-flow-power-gateway
+    init: true
+    command: sh -c "cd backend && PYTHONPATH=/app/backend/packages/harness:/app/backend uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${POWER_GATEWAY_WORKERS:-1}"
+    volumes:
+      # Live harness source (AIO sandbox fixes, CLI, tool_bridge_recovery, etc.)
+      - ../backend/packages/harness/deerflow:/app/backend/packages/harness/deerflow:ro
+      - ../scripts/deerflow-cli.sh:/usr/local/bin/deerflow:ro
+      - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
+      - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
+      - ../skills:/app/skills:ro
+      - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
+      - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
+      - type: bind
+        source: ${POWER_PROJECT_ROOT_PATH}
+        target: /mnt/host/omniai-whatsapp-v2
+      - type: bind
+        source: ${POWER_MOS1_PROJECT_PATH}
+        target: /mnt/host/MOS1.0-main
+      - type: bind
+        source: ${POWER_OMS_PROJECT_PATH}
+        target: /mnt/host/Oms-main
+      - type: bind
+        source: ${POWER_GITCONFIG_PATH}
+        target: /root/.gitconfig
+        read_only: true
+      - type: bind
+        source: ${POWER_SSH_DIR_PATH}
+        target: /root/.ssh
+        read_only: true
+      - type: bind
+        source: ${POWER_PRIVATE_TMP_PATH}
+        target: /private/tmp
+      - type: bind
+        source: ${HOME:?HOME must be set}/.claude
+        target: /root/.claude
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME:?HOME must be set}/.codex
+        target: /root/.codex
+        read_only: true
+        bind:
+          create_host_path: true
+    working_dir: /app
+    environment:
+      - CI=true
+      - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
+      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - DEER_FLOW_SANDBOX_BIND_HOST=${DEER_FLOW_SANDBOX_BIND_HOST:-127.0.0.1}
+      # When api-pool / codex transient errors exhaust retries, automatically
+      # fall back to a non-api-pool model (prefers Codex first, then any other
+      # non-api-pool model configured — Claude OAuth fits). Without this the
+      # middleware returns "已禁用自动切换到本机后备模型" and the user sees 503s.
+      - DEER_FLOW_API_POOL_FAILOVER_ENABLED=1
+      - POWER_WORKSPACES_PATH=${POWER_WORKSPACES_PATH}
+      - POWER_DOCUMENTS_PATH=${POWER_DOCUMENTS_PATH}
+      - POWER_DOWNLOADS_PATH=${POWER_DOWNLOADS_PATH}
+      - POWER_PROJECT_ROOT_PATH=${POWER_PROJECT_ROOT_PATH}
+      - POWER_MOS1_PROJECT_PATH=${POWER_MOS1_PROJECT_PATH}
+      - POWER_OMS_PROJECT_PATH=${POWER_OMS_PROJECT_PATH}
+      - POWER_WEBSITE_PROJECT_PATH=${POWER_WEBSITE_PROJECT_PATH}
+      - POWER_PRIVATE_TMP_PATH=${POWER_PRIVATE_TMP_PATH}
+      - POWER_GITCONFIG_PATH=${POWER_GITCONFIG_PATH}
+      - POWER_SSH_DIR_PATH=${POWER_SSH_DIR_PATH}
+      - POWER_SSH_CONFIG_PATH=${POWER_SSH_CONFIG_PATH}
+      - POWER_SSH_KNOWN_HOSTS_PATH=${POWER_SSH_KNOWN_HOSTS_PATH}
+      - POWER_SSH_SYSTEM_CONFIG_PATH=${POWER_SSH_SYSTEM_CONFIG_PATH}
+      - POWER_SSH_SYSTEM_KNOWN_HOSTS_PATH=${POWER_SSH_SYSTEM_KNOWN_HOSTS_PATH}
+      - POWER_SANDBOX_SSH_HOOK_SCRIPT_PATH=${POWER_SANDBOX_SSH_HOOK_SCRIPT_PATH}
+      - POWER_SANDBOX_RUN_HOOK_PRE_SERVICES=${POWER_SANDBOX_RUN_HOOK_PRE_SERVICES}
+      - POWER_SSH_AUTH_SOCK=${POWER_SSH_AUTH_SOCK}
+      - SSH_AUTH_SOCK=${POWER_SSH_AUTH_SOCK}
+      - CODEX_AUTH_PATH=/root/.codex/auth.json
+      - API_POOL_PROXY_URL=${API_POOL_PROXY_URL:-}
+    env_file:
+      - ../.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - deer-flow-power
+    restart: unless-stopped
+    cpus: 2.00
+    mem_limit: 1g
+    pids_limit: 1024
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  langgraph:
+    build:
+      context: ../
+      dockerfile: backend/Dockerfile
+    container_name: deer-flow-power-langgraph
+    init: true
+    command: sh -c "cd /app/backend && PYTHONPATH=/app/backend/packages/harness:/app/backend uv run langgraph dev --no-browser --allow-blocking --no-reload --n-jobs-per-worker ${POWER_LANGGRAPH_JOBS_PER_WORKER:-4} --host 0.0.0.0 --port 2024"
+    volumes:
+      - ${DEER_FLOW_CONFIG_PATH}:/app/config.yaml:ro
+      - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/extensions_config.json:ro
+      - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
+      - ${DEER_FLOW_LANGGRAPH_API_DIR}:/app/backend/.langgraph_api
+      - ../skills:/app/skills:ro
+      - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
+      # Single mount: full harness deerflow package (replaces per-subdir mounts)
+      - ../backend/packages/harness/deerflow:/app/backend/packages/harness/deerflow:ro
+      - ../scripts/deerflow-cli.sh:/usr/local/bin/deerflow:ro
+      - type: bind
+        source: ${POWER_PROJECT_ROOT_PATH}
+        target: /mnt/host/omniai-whatsapp-v2
+      - type: bind
+        source: ${POWER_MOS1_PROJECT_PATH}
+        target: /mnt/host/MOS1.0-main
+      - type: bind
+        source: ${POWER_OMS_PROJECT_PATH}
+        target: /mnt/host/Oms-main
+      - type: bind
+        source: ${POWER_GITCONFIG_PATH}
+        target: /root/.gitconfig
+        read_only: true
+      - type: bind
+        source: ${POWER_SSH_DIR_PATH}
+        target: /root/.ssh
+        read_only: true
+      - type: bind
+        source: ${POWER_PRIVATE_TMP_PATH}
+        target: /private/tmp
+      - type: bind
+        source: ${POWER_CLAUDE_VM_CLI_PATH:-./claude-vm-placeholder.sh}
+        target: /usr/local/bin/claude
+        read_only: true
+      - type: bind
+        source: ${HOME:?HOME must be set}/.claude
+        target: /root/.claude
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${HOME:?HOME must be set}/.codex
+        target: /root/.codex
+        read_only: true
+        bind:
+          create_host_path: true
+    environment:
+      - CI=true
+      - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/extensions_config.json
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
+      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - DEER_FLOW_SANDBOX_BIND_HOST=${DEER_FLOW_SANDBOX_BIND_HOST:-127.0.0.1}
+      # Same failover switch the gateway runs with — needed here because the
+      # LangGraph server is what actually invokes the LLM middleware chain.
+      - DEER_FLOW_API_POOL_FAILOVER_ENABLED=1
+      - POWER_WORKSPACES_PATH=${POWER_WORKSPACES_PATH}
+      - POWER_DOCUMENTS_PATH=${POWER_DOCUMENTS_PATH}
+      - POWER_DOWNLOADS_PATH=${POWER_DOWNLOADS_PATH}
+      - POWER_PROJECT_ROOT_PATH=${POWER_PROJECT_ROOT_PATH}
+      - POWER_MOS1_PROJECT_PATH=${POWER_MOS1_PROJECT_PATH}
+      - POWER_OMS_PROJECT_PATH=${POWER_OMS_PROJECT_PATH}
+      - POWER_WEBSITE_PROJECT_PATH=${POWER_WEBSITE_PROJECT_PATH}
+      - POWER_PRIVATE_TMP_PATH=${POWER_PRIVATE_TMP_PATH}
+      - POWER_GITCONFIG_PATH=${POWER_GITCONFIG_PATH}
+      - POWER_SSH_DIR_PATH=${POWER_SSH_DIR_PATH}
+      - POWER_SSH_CONFIG_PATH=${POWER_SSH_CONFIG_PATH}
+      - POWER_SSH_KNOWN_HOSTS_PATH=${POWER_SSH_KNOWN_HOSTS_PATH}
+      - POWER_SSH_SYSTEM_CONFIG_PATH=${POWER_SSH_SYSTEM_CONFIG_PATH}
+      - POWER_SSH_SYSTEM_KNOWN_HOSTS_PATH=${POWER_SSH_SYSTEM_KNOWN_HOSTS_PATH}
+      - POWER_SANDBOX_SSH_HOOK_SCRIPT_PATH=${POWER_SANDBOX_SSH_HOOK_SCRIPT_PATH}
+      - POWER_SANDBOX_RUN_HOOK_PRE_SERVICES=${POWER_SANDBOX_RUN_HOOK_PRE_SERVICES}
+      - POWER_SSH_AUTH_SOCK=${POWER_SSH_AUTH_SOCK}
+      - SSH_AUTH_SOCK=${POWER_SSH_AUTH_SOCK}
+      - CODEX_AUTH_PATH=/root/.codex/auth.json
+      - API_POOL_PROXY_URL=${API_POOL_PROXY_URL:-}
+      - BG_JOB_ISOLATED_LOOPS=${POWER_LANGGRAPH_BG_JOB_ISOLATED_LOOPS:-true}
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-false}
+    env_file:
+      - ../.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - deer-flow-power
+    restart: unless-stopped
+    cpus: 3.00
+    mem_limit: 8g
+    pids_limit: 2048
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  deer-flow-power:
+    driver: bridge
